@@ -1,0 +1,98 @@
+import numpy as np
+
+class ProsumerAgent:
+    def __init__(self, renewable_energy_sources, batteries, grid_connection, coordinator_agent):
+        self.renewable_energy_sources = renewable_energy_sources
+        self.batteries = batteries
+        self.grid_connection = grid_connection
+        self.coordinator_agent = coordinator_agent
+
+    def make_decision(self):
+        # Get the current state of the prosumer
+        state = self.get_state()
+
+        # Get the price of energy from the coordinator agent
+        price = self.coordinator_agent.get_price()
+
+        # Calculate the expected reward for each action
+        expected_rewards = self.calculate_expected_rewards(state, price)
+
+        # Add the constraint to the expected rewards
+
+        # Calculate the total expected reward for the prosumer
+        total_expected_reward = np.sum(expected_rewards)
+
+        # Select the action with the highest expected reward
+        action = expected_rewards.argmax()
+
+        # Take the action
+        self.take_action(action)
+
+    def get_state(self):
+        # Get the current state of the prosumer's renewable energy sources, batteries, and grid connection
+        state = [self.renewable_energy_sources.get_production(), self.batteries.get_level(), self.grid_connection.get_price()]
+
+        return state
+
+    def take_action(self, action):
+        # Take the action specified by the decision-making model
+        if action == "produce_energy":
+            self.renewable_energy_sources.produce_energy()
+        elif action == "consume_energy":
+            self.batteries.discharge()
+        elif action == "sell_energy":
+            self.grid_connection.sell_energy()
+        elif action == "buy_energy":
+            self.grid_connection.buy_energy()
+        else:
+            raise ValueError("Invalid action")
+
+    def calculate_expected_rewards(self, state, price):
+        # Calculate the expected reward for each action
+
+        expected_rewards = []
+
+        # Calculate the expected reward for the "produce_energy" action
+        expected_reward = price * self.renewable_energy_sources.get_production()
+        expected_rewards.append(expected_reward)
+
+        # Calculate the expected reward for the "consume_energy" action
+        expected_reward = -price * self.batteries.get_consumption()
+        expected_rewards.append(expected_reward)
+
+        # Calculate the expected reward for the "sell_energy" action
+        expected_reward = price * self.grid_connection.get_selling_capacity()
+        expected_rewards.append(expected_reward)
+
+        # Calculate the expected reward for the "buy_energy" action
+        expected_reward = -price * self.grid_connection.get_buying_capacity()
+        expected_rewards.append(expected_reward)
+
+        # Add the constraint to the expected rewards
+        # TODO: Implement the constraint here
+
+        return expected_rewards
+
+class CoordinatorAgent:
+    def __init__(self, prosumer_agents):
+        self.prosumer_agents = prosumer_agents
+
+    def set_price(self):
+        # Calculate the supply and demand ratio for energy
+        supply_and_demand_ratio = self.calculate_supply_and_demand_ratio()
+
+        # Set the price of energy based on the supply and demand ratio
+        price = self.calculate_price(supply_and_demand_ratio)
+
+        # Send the price to the prosumer agents
+        for prosumer_agent in self.prosumer_agents:
+            prosumer_agent.receive_price(price)
+
+    def calculate_supply_and_demand_ratio(self):
+        # Calculate the total supply of energy from the prosumer agents
+        total_supply = 0
+        for prosumer_agent in self.prosumer_agents:
+            total_supply += prosumer_agent.get_renewable_energy_sources().get_production()
+
+        # Calculate the total demand for energy from the prosumer agents
+        total_demand = 0
