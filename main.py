@@ -235,22 +235,4 @@ plt.ylabel('Value tapping index')
 plt.title('Value tapping index over iterations')
 plt.show()
 
-# Import the matplotlib library
 
-# Plot the graph
-plt.bar([price for price in prices], participation_willingness_data)
-plt.xlabel('Price')
-plt.ylabel('Participation willingness index')
-plt.title('Participation willingness index over prices')
-plt.show()
-# Import the matplotlib library
-
-# Define prices or use an existing variable
-prices = [10, 20, 30, 40, 50]
-
-# Plot the graph
-plt.bar(prices, participation_willingness_data)
-plt.xlabel('Price')
-plt.ylabel('Participation willingness index')
-plt.title('Participation willingness index over prices')
-plt.show()
