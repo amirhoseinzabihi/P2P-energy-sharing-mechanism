@@ -1,523 +1,83 @@
-{
-  "nbformat": 4,
-  "nbformat_minor": 0,
-  "metadata": {
-    "colab": {
-      "provenance": [],
-      "gpuType": "T4"
-    },
-    "kernelspec": {
-      "name": "python3",
-      "display_name": "Python 3"
-    },
-    "language_info": {
-      "name": "python"
-    },
-    "accelerator": "GPU"
-  },
-  "cells": [
-    {
-      "cell_type": "code",
-      "execution_count": 1,
-      "metadata": {
-        "id": "HDuDLaCzG-3I"
-      },
-      "outputs": [],
-      "source": [
-        "import tensorflow as tf\n",
-        "import numpy as np\n",
-        "\n",
-        "# currently 1 bi-directional lstm layer followed by a dense layer\n",
-        "import tensorflow as tf\n",
-        "import numpy as np\n",
-        "\n",
-        "class LSTM_network(tf.keras.Model):\n",
-        "    def __init__(self, n_hidden, embedding_dim, n_classes, n_layers, vocab_size, weights=None, debug=False):\n",
-        "        super(LSTM_network, self).__init__()\n",
-        "\n",
-        "        self.n_hidden = n_hidden\n",
-        "        self.embedding_dim = embedding_dim\n",
-        "        self.n_classes = n_classes\n",
-        "        self.n_layers = n_layers\n",
-        "        self.debug = debug\n",
-        "\n",
-        "        self.embedding = tf.keras.layers.Embedding(vocab_size, self.embedding_dim)\n",
-        "        self.lstm_fw = tf.keras.layers.LSTM(self.n_hidden, return_sequences=True, return_state=True)\n",
-        "        self.lstm_bw = tf.keras.layers.LSTM(self.n_hidden, return_sequences=True, return_state=True, go_backwards=True)\n",
-        "\n",
-        "        self.dense_fw = tf.keras.layers.Dense(n_classes)\n",
-        "        self.dense_bw = tf.keras.layers.Dense(n_classes)\n",
-        "\n",
-        "    def call(self, x):\n",
-        "        x = self.embedding(x)\n",
-        "        x_fw = self.lstm_fw(x)\n",
-        "        x_bw = self.lstm_bw(x)\n",
-        "\n",
-        "        y_fw = self.dense_fw(x_fw[0])\n",
-        "        y_bw = self.dense_bw(x_bw[0])\n",
-        "\n",
-        "        y_hat = y_fw + y_bw\n",
-        "        return y_hat\n",
-        "\n",
-        "\n",
-        "    def create_lstm_cell(self):\n",
-        "        cell = tf.keras.layers.LSTM(self.n_hidden)\n",
-        "        return cell\n",
-        "\n",
-        "    def check_weights(self, weights):\n",
-        "        assert len(weights) == 8\n",
-        "        assert weights[0].shape == weights[3].shape == (self.embedding_dim, 4 * self.n_hidden)\n",
-        "        assert weights[1].shape == weights[4].shape == (self.n_hidden, 4 * self.n_hidden)\n",
-        "        assert weights[2].shape == weights[5].shape == (4 * self.n_hidden, )\n",
-        "        assert weights[6].shape == (2 * self.n_hidden, self.n_classes)\n",
-        "        assert weights[7].shape == (self.n_classes,)\n",
-        "\n",
-        "    # x is batch of embedding vectors (batch_size, embedding_dim)\n",
-        "    @tf.function\n",
-        "    def cell_step(self, x, h_old, c_old, W_x, W_h, b):\n",
-        "        # fward pass\n",
-        "        gate_x = tf.matmul(x, W_x)\n",
-        "        gate_h = tf.matmul(h_old, W_h)\n",
-        "        gate_pre = gate_x + gate_h + b\n",
-        "        gate_post = tf.concat([\n",
-        "                            tf.sigmoid(gate_pre[:, self.idx_i]), tf.sigmoid(gate_pre[:, self.idx_f]),\n",
-        "                            tf.tanh(gate_pre[:, self.idx_c]), tf.sigmoid(gate_pre[:, self.idx_o]),\n",
-        "                            ], axis=1)\n",
-        "        c_new = gate_post[:, self.idx_f] * c_old + gate_post[:, self.idx_i] * gate_post[:, self.idx_c]\n",
-        "        h_new = gate_post[:, self.idx_o] * tf.tanh(c_new)\n",
-        "        return gate_pre, gate_post, c_new, h_new\n",
-        "\n",
-        "    @tf.function\n",
-        "    def one_step_fward(self, x, h_old_fw, c_old_fw):\n",
-        "        fward = self.cell_step(x, h_old_fw, c_old_fw, self.W_x_fward, self.W_h_fward, self.b_fward)\n",
-        "        return fward\n",
-        "\n",
-        "    @tf.function\n",
-        "    def one_step_bward(self, x_rev, h_old_bw, c_old_bw):\n",
-        "        bward = self.cell_step(x_rev, h_old_bw, c_old_bw, self.W_x_bward, self.W_h_bward, self.b_bward)\n",
-        "        return bward\n",
-        "\n",
-        "    # input is full batch (batch_size, T, embedding_dim)\n",
-        "    @tf.function(experimental_relax_shapes=True)\n",
-        "    def full_pass(self, x):\n",
-        "        assert len(x.shape) == 3, '3 dimensional input required, got input of len {}'.format(len(x.shape))\n",
-        "        batch_size = x.shape[0]\n",
-        "        # we have to reorder the input since tf.scan scans the input along the first axis\n",
-        "        elems = tf.transpose(x, perm=[1,0,2])\n",
-        "        initializer = (tf.constant(np.zeros((batch_size, 4 * self.n_hidden))),  # gates_pre\n",
-        "                       tf.constant(np.zeros((batch_size, 4 * self.n_hidden))),  # gates_post\n",
-        "                       tf.constant(np.zeros((batch_size, self.n_hidden))),      # c_t\n",
-        "                       tf.constant(np.zeros((batch_size, self.n_hidden))))      # h_t\n",
-        "        fn_fward = lambda a, x: self.one_step_fward(x, a[3], a[2])\n",
-        "        fn_bward = lambda a, x: self.one_step_bward(x, a[3], a[2])\n",
-        "        # outputs contain tesnors with (T, gates_pre, gates_post, c,h)\n",
-        "        o_fward = tf.scan(fn_fward, elems, initializer=initializer)\n",
-        "        o_bward = tf.scan(fn_bward, elems, initializer=initializer, reverse=True)\n",
-        "        # final prediction scores\n",
-        "        y_fward = tf.matmul(o_fward[3][-1], self.W_dense_fw)\n",
-        "        y_bward = tf.matmul(o_bward[3][0], self.W_dense_bw)\n",
-        "        y_hat = y_fward + y_bward + self.b_dense\n",
-        "        self.y_hat.assign(y_hat)\n",
-        "        return y_hat, o_fward, o_bward\n",
-        "\n",
-        "    def lrp_linear_layer(self, h_in, w, b, hout, Rout, bias_nb_units, eps, bias_factor=0.0):\n",
-        "        bias_factor_t = tf.constant(bias_factor, dtype=tf.float64)\n",
-        "        eps_t = tf.constant(eps, dtype=tf.float64)\n",
-        "        sign_out = tf.cast(tf.where(hout >= 0, 1., -1.), tf.float64)   # shape (batch_size, M)\n",
-        "        numerator_1 = tf.expand_dims(h_in, axis=2) * w\n",
-        "        numerator_2 = bias_factor_t * (tf.expand_dims(b, 0) + eps_t * sign_out) / bias_nb_units\n",
-        "        numerator = numerator_1 + tf.expand_dims(numerator_2, 1)\n",
-        "        denom = hout + (eps*sign_out)\n",
-        "        message = numerator / tf.expand_dims(denom, 1) * tf.expand_dims(Rout, 1)\n",
-        "        R_in = tf.reduce_sum(message, axis=2)\n",
-        "        return R_in\n",
-        "\n",
-        "    def lrp(self, x, y=None, eps=1e-3, bias_factor=0.0):\n",
-        "        assert len(x.shape) == 3, '3 dimensional input required, got input of len {}'.format(len(x.shape))\n",
-        "        lrp_pass = self.lrp_lstm(x,y,eps, bias_factor)\n",
-        "        # add forward and backward relevances of x.\n",
-        "        # Here we have to reverse R_x_fw since the tf.scan() function starts at the last timestep (T-1) and moves to\n",
-        "        # timestep 0. Therefore the last entry of lrp_pass[2] belongs to the first timestep of x. Likewise, the last\n",
-        "        # entry of lrp_pass[5] (R_x_rev) belongs to the last timestep of x and is thus already in the right order.\n",
-        "        Rx_ = tf.reverse(lrp_pass[2], axis=[0]) + lrp_pass[5]\n",
-        "        Rx = tf.transpose(Rx_, perm=(1,0,2))  # put batch dimension to first dim again\n",
-        "        # remaining relevance is sum of last entry of Rh and Rc\n",
-        "        rest = tf.reduce_sum(lrp_pass[0][-1] + lrp_pass[1][-1] + lrp_pass[3][-1] + lrp_pass[4][-1], axis=1)\n",
-        "        return Rx, rest\n",
-        "\n",
-        "    @tf.function\n",
-        "    def lrp_lstm(self, x, y=None, eps=1e-3, bias_factor=0.0):\n",
-        "        batch_size = x.shape[0]\n",
-        "        T = x.shape[1]\n",
-        "        x_rev = tf.reverse(x, axis=[1])\n",
-        "        # update inner states\n",
-        "        y_hat, output_fw, output_bw = self.full_pass(x)\n",
-        "        # if classes are given, use them. Else choose prediction of the network\n",
-        "        if y is not None:\n",
-        "            assert y.shape == (batch_size, )\n",
-        "            if not y.dtype is tf.int64:\n",
-        "                y = tf.cast(y, tf.int64)\n",
-        "            R_out_mask = tf.one_hot(y, depth=self.n_classes, dtype=tf.float64)\n",
-        "        else:\n",
-        "            R_out_mask = tf.one_hot(tf.argmax(y_hat, axis=1), depth=self.n_classes, dtype=tf.float64)\n",
-        "        R_T = y_hat * R_out_mask\n",
-        "        gates_pre_fw, gates_post_fw, c_fw, h_fw = output_fw\n",
-        "        gates_pre_bw, gates_post_bw, c_bw, h_bw = output_bw\n",
-        "        # c and h have one timestep more than x (the initial one, we have to add these zeros manually)\n",
-        "        zero_block = tf.constant(np.zeros((1, batch_size, self.n_hidden)))\n",
-        "        c_fw = tf.concat([c_fw, zero_block], axis=0)\n",
-        "        h_fw = tf.concat([h_fw, zero_block], axis=0)\n",
-        "        gates_pre_bw = tf.reverse(gates_pre_bw, [0])\n",
-        "        gates_post_bw = tf.reverse(gates_post_bw, [0])\n",
-        "        c_bw = tf.reverse(c_bw, [0])\n",
-        "        h_bw = tf.reverse(h_bw, [0])\n",
-        "        c_bw = tf.concat([c_bw, zero_block], axis=0)\n",
-        "        h_bw = tf.concat([h_bw, zero_block], axis=0)\n",
-        "\n",
-        "        # first calculate relevaces from final linear layer\n",
-        "        Rh_fw_T = self.lrp_linear_layer(h_fw[T - 1], self.W_dense_fw, self.b_dense,\n",
-        "                                       y_hat, R_T, 2*self.n_hidden, eps, bias_factor)\n",
-        "        Rh_bw_T = self.lrp_linear_layer(h_bw[T - 1], self.W_dense_bw, self.b_dense,\n",
-        "                                       y_hat, R_T, 2*self.n_hidden, eps, bias_factor)\n",
-        "        if self.debug:\n",
-        "            tf.print('Dense: Input relevance', tf.reduce_sum(R_T, axis=1))\n",
-        "            tf.print('Dense: Output relevance', tf.reduce_sum(Rh_fw_T+Rh_bw_T, axis=1))\n",
-        "        elems = np.arange(T-1, -1, -1)\n",
-        "        initializer = (\n",
-        "                       Rh_fw_T,                                                                     # R_h_fw\n",
-        "                       Rh_fw_T,                                                                     # R_c_fw\n",
-        "                       tf.constant(np.zeros((batch_size, self.embedding_dim)), name='R_x_fw'),      # R_x_fw\n",
-        "                       Rh_bw_T,                                                                     # R_h_bw\n",
-        "                       Rh_bw_T,                                                                     # R_c_bw\n",
-        "                       tf.constant(np.zeros((batch_size, self.embedding_dim)), name='R_x_bw')       # R_x_bw\n",
-        "                       )\n",
-        "        eye = tf.eye(self.n_hidden, dtype=tf.float64)\n",
-        "        zeros_hidden = tf.constant(np.zeros((self.n_hidden)))\n",
-        "\n",
-        "        @tf.function\n",
-        "        def update(input_tuple, t):\n",
-        "            # t starts with T-1 ; the values we want to update are essentially Rh, Rc and Rx\n",
-        "            # input_tuple is (R_h_fw_t+1, R_c_fw_t+1, R_x_fw_t+1, R_h_bw_t+1, R_h_bw_t+1, R_x_bw_t+1)\n",
-        "            #forward\n",
-        "            Rc_fw_t = self.lrp_linear_layer(gates_post_fw[t, :, self.idx_f] * c_fw[t-1, :], eye, zeros_hidden,\n",
-        "                                               c_fw[t, :],  input_tuple[1], 2*self.n_hidden, eps, bias_factor)\n",
-        "            R_g_fw = self.lrp_linear_layer(gates_post_fw[t,:,self.idx_i] * gates_post_fw[t,:,self.idx_c], eye,\n",
-        "                                        zeros_hidden, c_fw[t, :], input_tuple[1], 2*self.n_hidden, eps, bias_factor)\n",
-        "            if self.debug:\n",
-        "                tf.print('Fw1: Input relevance', tf.reduce_sum(input_tuple[1], axis=1))\n",
-        "                tf.print('Fw1: Output relevance', tf.reduce_sum(Rc_fw_t + R_g_fw, axis=1))\n",
-        "            Rx_t = self.lrp_linear_layer(x[:,t], self.W_x_fward[:, self.idx_c], self.b_fward[self.idx_c],\n",
-        "                                         gates_pre_fw[t, :, self.idx_c], R_g_fw, self.n_hidden + self.embedding_dim, eps, bias_factor)\n",
-        "            Rh_fw_t = self.lrp_linear_layer(h_fw[t-1, :], self.W_h_fward[:, self.idx_c], self.b_fward[self.idx_c],\n",
-        "                                            gates_pre_fw[t, :, self.idx_c], R_g_fw, self.n_hidden + self.embedding_dim, eps, bias_factor\n",
-        "                                            )\n",
-        "            if self.debug:\n",
-        "                tf.print('Fw2: Input relevance', tf.reduce_sum(R_g_fw, axis=1))\n",
-        "                tf.print('Fw2: Output relevance', tf.reduce_sum(Rx_t,axis=1)+tf.reduce_sum(Rh_fw_t, axis=1))\n",
-        "            if t != 0:\n",
-        "                Rc_fw_t += Rh_fw_t\n",
-        "            #backward\n",
-        "            Rc_bw_t = self.lrp_linear_layer(gates_post_bw[t, :, self.idx_f] * c_bw[t-1, :], eye, zeros_hidden,\n",
-        "                                            c_bw[t, :], input_tuple[4], 2*self.n_hidden, eps, bias_factor)\n",
-        "            R_g_bw = self.lrp_linear_layer(gates_post_bw[t, :, self.idx_i] * gates_post_bw[t, :, self.idx_c], eye,\n",
-        "                                           zeros_hidden, c_bw[t,:], input_tuple[4], 2*self.n_hidden, eps, bias_factor)\n",
-        "            if self.debug:\n",
-        "                tf.print('Bw1: Input relevance', tf.reduce_sum(input_tuple[4], axis=1))\n",
-        "                tf.print('Bw1: Output relevance', tf.reduce_sum(Rc_bw_t + R_g_bw, axis=1))\n",
-        "            Rx_rev_t = self.lrp_linear_layer(x_rev[:, t], self.W_x_bward[:, self.idx_c], self.b_bward[self.idx_c],\n",
-        "                                            gates_pre_bw[t, :, self.idx_c], R_g_bw, self.n_hidden + self.embedding_dim, eps, bias_factor)\n",
-        "            Rh_bw_t = self.lrp_linear_layer(h_bw[t-1, :], self.W_h_bward[:, self.idx_c], self.b_bward[self.idx_c],\n",
-        "                                            gates_pre_bw[t, :, self.idx_c], R_g_bw, self.n_hidden + self.embedding_dim, eps, bias_factor\n",
-        "                                            )\n",
-        "            if self.debug:\n",
-        "                tf.print('Bw2: Input relevance', tf.reduce_sum(R_g_bw, axis=1))\n",
-        "                tf.print('Bw2: Output relevance', tf.reduce_sum(Rx_rev_t,axis=1)+tf.reduce_sum(Rh_bw_t, axis=1))\n",
-        "            if t != 0:\n",
-        "                Rc_bw_t += Rh_bw_t\n",
-        "            return Rh_fw_t, Rc_fw_t, Rx_t, Rh_bw_t, Rc_bw_t, Rx_rev_t\n",
-        "\n",
-        "        lrp_pass = tf.scan(update, elems, initializer)\n",
-        "        return lrp_pass\n"
-      ]
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "import tensorflow as tf\n",
-        "from tensorflow.keras.preprocessing.sequence import pad_sequences\n",
-        "from tensorflow.keras.datasets import imdb\n",
-        "\n",
-        "# Set hyperparameters\n",
-        "n_hidden = 128\n",
-        "embedding_dim = 128\n",
-        "n_classes = 1\n",
-        "n_layers = 2\n",
-        "batch_size = 32\n",
-        "epochs = 10\n",
-        "\n",
-        "# Load and preprocess data\n",
-        "(x_train, y_train), (x_test, y_test) = imdb.load_data(num_words=10000)\n",
-        "x_train = pad_sequences(x_train, maxlen=100)\n",
-        "x_test = pad_sequences(x_test, maxlen=100)\n",
-        "\n",
-        "vocab_size = 10000\n",
-        "model = LSTM_network(n_hidden=n_hidden, embedding_dim=embedding_dim, n_classes=n_classes, n_layers=n_layers, vocab_size=vocab_size)\n",
-        "\n",
-        "\n",
-        "# Compile model\n",
-        "model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])\n",
-        "\n",
-        "# Train model\n",
-        "model.fit(x_train, y_train, batch_size=batch_size, epochs=epochs, validation_data=(x_test, y_test))\n",
-        "\n",
-        "# Evaluate model\n",
-        "loss, accuracy = model.evaluate(x_test, y_test, batch_size=batch_size)\n",
-        "print('Test loss:', loss)\n",
-        "print('Test accuracy:', accuracy)\n"
-      ],
-      "metadata": {
-        "colab": {
-          "base_uri": "https://localhost:8080/"
-        },
-        "id": "MZs9k26_Re1Q",
-        "outputId": "dcfc34b5-c1a4-4b06-cb9f-a4215d53f82c"
-      },
-      "execution_count": 2,
-      "outputs": [
-        {
-          "output_type": "stream",
-          "name": "stdout",
-          "text": [
-            "Epoch 1/10\n",
-            "782/782 [==============================] - 67s 68ms/step - loss: 0.7108 - accuracy: 0.4998 - val_loss: 0.6982 - val_accuracy: 0.5006\n",
-            "Epoch 2/10\n",
-            "782/782 [==============================] - 18s 23ms/step - loss: 0.6978 - accuracy: 0.5034 - val_loss: 0.6984 - val_accuracy: 0.5001\n",
-            "Epoch 3/10\n",
-            "782/782 [==============================] - 19s 25ms/step - loss: 0.6968 - accuracy: 0.4991 - val_loss: 0.6937 - val_accuracy: 0.5021\n",
-            "Epoch 4/10\n",
-            "782/782 [==============================] - 17s 21ms/step - loss: 0.6955 - accuracy: 0.4993 - val_loss: 0.6961 - val_accuracy: 0.5000\n",
-            "Epoch 5/10\n",
-            "782/782 [==============================] - 17s 22ms/step - loss: 0.6948 - accuracy: 0.5015 - val_loss: 0.6933 - val_accuracy: 0.5034\n",
-            "Epoch 6/10\n",
-            "782/782 [==============================] - 16s 21ms/step - loss: 0.6951 - accuracy: 0.5012 - val_loss: 0.6966 - val_accuracy: 0.5000\n",
-            "Epoch 7/10\n",
-            "782/782 [==============================] - 16s 21ms/step - loss: 0.6945 - accuracy: 0.4995 - val_loss: 0.6933 - val_accuracy: 0.5022\n",
-            "Epoch 8/10\n",
-            "782/782 [==============================] - 16s 20ms/step - loss: 0.6947 - accuracy: 0.5035 - val_loss: 0.6952 - val_accuracy: 0.5000\n",
-            "Epoch 9/10\n",
-            "782/782 [==============================] - 15s 19ms/step - loss: 0.6940 - accuracy: 0.5035 - val_loss: 0.6933 - val_accuracy: 0.5010\n",
-            "Epoch 10/10\n",
-            "782/782 [==============================] - 17s 22ms/step - loss: 0.6941 - accuracy: 0.5018 - val_loss: 0.6951 - val_accuracy: 0.5000\n",
-            "782/782 [==============================] - 5s 6ms/step - loss: 0.6951 - accuracy: 0.5000\n",
-            "Test loss: 0.6950645446777344\n",
-            "Test accuracy: 0.500042200088501\n"
-          ]
-        }
-      ]
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "check if existing model is compatible with the new LSTM_network code"
-      ],
-      "metadata": {
-        "id": "m4vnnP2CWYmJ"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "import json\n",
-        "from tensorflow.keras.models import model_from_json, load_model\n",
-        "\n",
-        "# Load model architecture from JSON\n",
-        "with open('model_C3.json', 'r') as json_file:\n",
-        "    model_json = json_file.read()\n",
-        "loaded_model = model_from_json(model_json)\n",
-        "\n",
-        "# Load model weights from .h5 file\n",
-        "loaded_model.load_weights('model_C3.h5')\n",
-        "\n",
-        "# Print the architecture of the loaded model\n",
-        "print(\"Loaded model architecture:\")\n",
-        "loaded_model.summary()\n",
-        "\n",
-        "# Compare with the new LSTM_network model\n",
-        "print(\"\\nNew LSTM_network model architecture:\")\n",
-        "model.summary()\n",
-        "\n",
-        "# Check if the architectures are compatible\n",
-        "# If they are not, you may need to modify the LSTM_network class\n"
-      ],
-      "metadata": {
-        "colab": {
-          "base_uri": "https://localhost:8080/"
-        },
-        "id": "6NI33JxsI-j0",
-        "outputId": "b705ee07-ddf6-4c40-a89d-2255bd70ee57"
-      },
-      "execution_count": 5,
-      "outputs": [
-        {
-          "output_type": "stream",
-          "name": "stderr",
-          "text": [
-            "WARNING:tensorflow:Layer lstm_66 will not use cuDNN kernels since it doesn't meet the criteria. It will use a generic GPU kernel as fallback when running on GPU.\n",
-            "WARNING:tensorflow:Layer lstm_67 will not use cuDNN kernels since it doesn't meet the criteria. It will use a generic GPU kernel as fallback when running on GPU.\n"
-          ]
-        },
-        {
-          "output_type": "stream",
-          "name": "stdout",
-          "text": [
-            "Loaded model architecture:\n",
-            "Model: \"sequential_27\"\n",
-            "_________________________________________________________________\n",
-            " Layer (type)                Output Shape              Param #   \n",
-            "=================================================================\n",
-            " lstm_66 (LSTM)              (None, 20, 200)           161600    \n",
-            "                                                                 \n",
-            " lstm_67 (LSTM)              (None, 200)               320800    \n",
-            "                                                                 \n",
-            " dropout_27 (Dropout)        (None, 200)               0         \n",
-            "                                                                 \n",
-            " dense_27 (Dense)            (None, 1)                 201       \n",
-            "                                                                 \n",
-            "=================================================================\n",
-            "Total params: 482,601\n",
-            "Trainable params: 482,601\n",
-            "Non-trainable params: 0\n",
-            "_________________________________________________________________\n",
-            "\n",
-            "New LSTM_network model architecture:\n",
-            "Model: \"lstm_network\"\n",
-            "_________________________________________________________________\n",
-            " Layer (type)                Output Shape              Param #   \n",
-            "=================================================================\n",
-            " embedding (Embedding)       multiple                  1280000   \n",
-            "                                                                 \n",
-            " lstm (LSTM)                 multiple                  131584    \n",
-            "                                                                 \n",
-            " lstm_1 (LSTM)               multiple                  131584    \n",
-            "                                                                 \n",
-            " dense (Dense)               multiple                  129       \n",
-            "                                                                 \n",
-            " dense_1 (Dense)             multiple                  129       \n",
-            "                                                                 \n",
-            "=================================================================\n",
-            "Total params: 1,543,426\n",
-            "Trainable params: 1,543,426\n",
-            "Non-trainable params: 0\n",
-            "_________________________________________________________________\n"
-          ]
-        }
-      ]
-    },
-    {
-      "cell_type": "markdown",
-      "source": [
-        "measure the correctness of LSTM_network code using a previously trained model"
-      ],
-      "metadata": {
-        "id": "Nx5sGo3VWKg0"
-      }
-    },
-    {
-      "cell_type": "code",
-      "source": [
-        "import json\n",
-        "from tensorflow.keras.models import model_from_json, load_model\n",
-        "import numpy as np\n",
-        "\n",
-        "# Load model architecture from JSON\n",
-        "with open('model_C3.json', 'r') as json_file:\n",
-        "    model_json = json_file.read()\n",
-        "loaded_model = model_from_json(model_json)\n",
-        "\n",
-        "# Load model weights from .h5 file\n",
-        "loaded_model.load_weights('model_C3.h5')\n",
-        "\n",
-        "# Compile the loaded model\n",
-        "loaded_model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])\n",
-        "\n",
-        "# Reshape x_test to match the expected input shape\n",
-        "x_test_reshaped = x_test.reshape(x_test.shape[0], 20, -1)\n",
-        "\n",
-        "# Assuming x_test has the shape (None, 20, 5)\n",
-        "x_test_single_feature = np.mean(x_test, axis=-1, keepdims=True)\n",
-        "\n",
-        "# Evaluate the loaded model on the reshaped test dataset\n",
-        "loss_loaded, accuracy_loaded = loaded_model.evaluate(x_test_single_feature, y_test, batch_size=batch_size)\n",
-        "\n",
-        "\n",
-        "print('Loaded model test loss:', loss_loaded)\n",
-        "print('Loaded model test accuracy:', accuracy_loaded)\n",
-        "\n",
-        "# Train and evaluate the new LSTM_network model\n",
-        "model.fit(x_train, y_train, batch_size=batch_size, epochs=epochs)\n",
-        "loss_new, accuracy_new = model.evaluate(x_test, y_test, batch_size=batch_size)\n",
-        "print('New LSTM_network model test loss:', loss_new)\n",
-        "print('New LSTM_network model test accuracy:', accuracy_new)\n",
-        "\n",
-        "# Compare the performance of the loaded model and the new LSTM_network model\n",
-        "print('\\nPerformance comparison:')\n",
-        "print(f'Loaded model accuracy: {accuracy_loaded:.2f}')\n",
-        "print(f'New LSTM_network model accuracy: {accuracy_new:.2f}')\n"
-      ],
-      "metadata": {
-        "colab": {
-          "base_uri": "https://localhost:8080/"
-        },
-        "id": "kJR-ZSDcRezN",
-        "outputId": "ab48975e-6386-4980-f024-4318ff736a84"
-      },
-      "execution_count": 3,
-      "outputs": [
-        {
-          "output_type": "stream",
-          "name": "stderr",
-          "text": [
-            "WARNING:tensorflow:Layer lstm_66 will not use cuDNN kernels since it doesn't meet the criteria. It will use a generic GPU kernel as fallback when running on GPU.\n",
-            "WARNING:tensorflow:Layer lstm_67 will not use cuDNN kernels since it doesn't meet the criteria. It will use a generic GPU kernel as fallback when running on GPU.\n"
-          ]
-        },
-        {
-          "output_type": "stream",
-          "name": "stdout",
-          "text": [
-            "782/782 [==============================] - 3s 3ms/step - loss: 7.6246 - accuracy: 0.5000\n",
-            "Loaded model test loss: 7.624584197998047\n",
-            "Loaded model test accuracy: 0.5\n",
-            "Epoch 1/10\n",
-            "782/782 [==============================] - 11s 13ms/step - loss: 0.6945 - accuracy: 0.4963\n",
-            "Epoch 2/10\n",
-            "782/782 [==============================] - 11s 14ms/step - loss: 0.6938 - accuracy: 0.5065\n",
-            "Epoch 3/10\n",
-            "782/782 [==============================] - 11s 14ms/step - loss: 0.6940 - accuracy: 0.4978\n",
-            "Epoch 4/10\n",
-            "782/782 [==============================] - 12s 15ms/step - loss: 0.6940 - accuracy: 0.5001\n",
-            "Epoch 5/10\n",
-            "782/782 [==============================] - 11s 14ms/step - loss: 0.6938 - accuracy: 0.4990\n",
-            "Epoch 6/10\n",
-            "782/782 [==============================] - 11s 14ms/step - loss: 0.6941 - accuracy: 0.4991\n",
-            "Epoch 7/10\n",
-            "782/782 [==============================] - 11s 14ms/step - loss: 0.6936 - accuracy: 0.5054\n",
-            "Epoch 8/10\n",
-            "782/782 [==============================] - 11s 14ms/step - loss: 0.6938 - accuracy: 0.5054\n",
-            "Epoch 9/10\n",
-            "782/782 [==============================] - 11s 15ms/step - loss: 0.6935 - accuracy: 0.5026\n",
-            "Epoch 10/10\n",
-            "782/782 [==============================] - 11s 14ms/step - loss: 0.6934 - accuracy: 0.5055\n",
-            "782/782 [==============================] - 5s 7ms/step - loss: 0.6948 - accuracy: 0.5000\n",
-            "New LSTM_network model test loss: 0.6947767734527588\n",
-            "New LSTM_network model test accuracy: 0.4999975860118866\n",
-            "\n",
-            "Performance comparison:\n",
-            "Loaded model accuracy: 0.50\n",
-            "New LSTM_network model accuracy: 0.50\n"
-          ]
-        }
-      ]
-    }
-  ]
-}
+def prosumer_optimization_formula(prosumer_bids, external_price, internal_price):
+  """
+  Calculates the optimal production and consumption for a prosumer.
+
+  Args:
+    prosumer_bids: A tuple of the prosumer's production and consumption bids.
+    external_price: The external price of energy.
+    internal_price: The internal price of energy.
+
+  Returns:
+    A tuple of the prosumer's optimal production and consumption.
+  """
+
+  # Calculate the prosumer's cost and revenue functions
+  cost_function = lambda production: 0.5 * (production * external_price) ** 2
+  revenue_function = lambda consumption: consumption * internal_price
+
+  # Define the optimization problem
+  optimization_problem = pulp.LpProblem("Prosumer Optimization", pulp.LpMinimize)
+
+  # Add decision variables
+  production = pulp.LpVariable("production", low=0)
+  consumption = pulp.LpVariable("consumption", low=0)
+
+  # Add constraints
+  optimization_problem.addConstraint(production >= prosumer_bids[0])
+  optimization_problem.addConstraint(consumption >= prosumer_bids[1])
+  optimization_problem.addConstraint(production + consumption <= prosumer_bids[0] + prosumer_bids[1])
+
+  # Add objective function
+  optimization_problem.setObjective(cost_function(production) - revenue_function(consumption))
+
+  # Solve the optimization problem
+  pulp.solve(optimization_problem)
+
+  # Get the optimal production and consumption
+  optimal_production = production.value()
+  optimal_consumption = consumption.value()
+
+  return optimal_production, optimal_consumption
+
+def coordinator_agent_pricing_model(self, external_price):
+  """
+  Calculates the internal price of energy and the amount of energy traded.
+
+  Args:
+    external_price: The external price of energy.
+
+  Returns:
+    A tuple of the internal price of energy and the amount of energy traded.
+  """
+
+  # Calculate the optimal production and consumption for each prosumer
+  prosumer_optimals = []
+  for prosumer_bid in self.prosumer_bids:
+    prosumer_optimals.append(prosumer_optimization_formula(prosumer_bid, external_price, self.internal_price))
+
+  # Update the prosumer bids with the optimal values
+  self.prosumer_bids = prosumer_optimals
+
+  # Calculate the energy demand
+  energy_demand = self.retailer.requested_amount
+
+  # Calculate the energy supply
+  energy_supply = sum([prosumer_optimal[0] for prosumer_optimal in prosumer_optimals])
+
+  # Determine the internal price using the auction algorithm
+  internal_price = auction(self.prosumer_bids, energy_demand)
+
+  # Calculate the amount of energy traded
+  energy_traded = min(energy_supply, energy_demand)
+
+  return internal_price, energy_traded
+
+# Modify the `run_pricing_model()` method to use the coordinator agent pricing model
+def run_pricing_model(self, step_length, external_price):
+  # ...
+
+  # Calculate the internal price and energy traded
+  internal_price, energy_traded = self.coordinator_agent_pricing_model(external_price)
+
+  # ...
+
